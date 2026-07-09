@@ -12,6 +12,8 @@
 #define MAX_ARGS 64
 #define BUFFER_MAX 1024
 
+#define DEBUG
+
 
 struct command {
     const char **argv;
@@ -105,8 +107,28 @@ char *get_dir(const char *path) {
     return buf;
 }
 
-// Check if called argument is a builtin and act accordingly
-// Return -1 when command is not builtin
+void open_pipe_fd(int fdi, int fdo) {
+    if (fdi != STDIN_FILENO)
+        if(dup2(fdi, STDIN_FILENO) == -1) 
+            die("dup2");
+
+    if (fdo != STDOUT_FILENO)
+        if(dup2(fdo, STDOUT_FILENO) == -1)
+            die("dup2");
+}
+
+void close_pipe_fd(int fdi, int fdo) {
+    if (fdi != STDIN_FILENO)
+        if(close(fdi) == -1) 
+            die("close");
+
+    if (fdo != STDOUT_FILENO)
+        if(close(fdo) == -1)
+            die("close");
+}
+
+// Check for and execute builting commands
+// Return 0 if command is builtin; else -1
 int handle_builtin(const char** argv, int fdi, int fdo) {
 #ifdef DEBUG
     printf("handle_builtin() called\n");
@@ -115,15 +137,8 @@ int handle_builtin(const char** argv, int fdi, int fdo) {
 
     int bi_flag = -1;
 
-    if (fdi != STDIN_FILENO)
-        if(dup2(fdi, STDIN_FILENO) == -1) 
-            die("dup2");
-
-    if (fdo != STDOUT_FILENO)
-        if(dup2(fdo, STDOUT_FILENO) == -1)
-            die("dup2");
-
-
+    // Currently supported builtins:
+    //  cd, pwd, exit
     if (strcmp(argv[0], "cd") == 0) {
         char *dir = get_dir(argv[1]);
 
@@ -140,26 +155,17 @@ int handle_builtin(const char** argv, int fdi, int fdo) {
         if (!dir) 
             die("getcwd");
 
-        printf("%s\n", dir);
+        write(fdo, dir, sizeof(dir));
         free(dir);
 
         bi_flag = 0;
     }
 
     if (strcmp(argv[0], "exit") == 0) {
-#ifdef DEBUG
-        printf("pwd detected");
-#endif
         exit(EXIT_SUCCESS);
     }
 
-    if (fdi != STDIN_FILENO)
-        if(close(fdi) == -1) 
-            die("close");
-
-    if (fdo != STDOUT_FILENO)
-        if(close(fdo) == -1)
-            die("close");
+    close_pipe_fd(fdi, fdo);
 
     return bi_flag;
 }
@@ -180,13 +186,7 @@ pid_t spawn_proc(struct command *cmd, int fdi, int fdo) {
 
     if (p == 0) {
         // Redirect stdin and stdout to given pipes respectively
-        if (fdi != STDIN_FILENO)
-            if(dup2(fdi, STDIN_FILENO) == -1) 
-                die("dup2");
-
-        if (fdo != STDOUT_FILENO)
-            if(dup2(fdo, STDOUT_FILENO) == -1)
-                die("dup2");
+        open_pipe_fd(fdi, fdo);
 
         if (execvp(cmd->argv[0], (char *const *)cmd->argv) == -1)
             die("execvp");
@@ -215,7 +215,7 @@ int pipeline(char *input) {
 
     while (iter) {
 #ifdef DEBUG
-        printf("entered while(iter) loop with iter = %u\n", iter);
+        printf("entered while(iter) loop with iter = %p\n", iter);
 #endif
 
         // If there exists a next pipeline stage, make a new pipe
