@@ -12,8 +12,6 @@
 #define MAX_ARGS 64
 #define BUFFER_MAX 1024
 
-#define DEBUG
-
 
 struct command {
     const char **argv;
@@ -71,13 +69,19 @@ int parse_command(char *str, struct command *cmd) {
             *iter++ = '\0';
             while (*iter != '\0' && *iter == ' ') iter++;
 
-            if (argc >= MAX_ARGS)
-                die("Maximum argument number surpassed");
+            if (*iter != '\0') {
+                if (argc >= MAX_ARGS)
+                    die("Maximum argument number surpassed");
 
-            cmd->argv[argc++] = iter;
+                cmd->argv[argc++] = iter;
+            }
         }
     }
 
+    if (argc >= MAX_ARGS)
+        die("Maximum argument number surpassed");
+
+    cmd->argv[argc] = NULL;
 
 #ifdef DEBUG
     printf("str: %s\n", str);
@@ -107,29 +111,35 @@ char *get_dir(const char *path) {
     return buf;
 }
 
-void open_pipe_fd(int fdi, int fdo) {
-    if (fdi != STDIN_FILENO)
-        if(dup2(fdi, STDIN_FILENO) == -1) 
+void route_stdio_fd(int fdr, int fdw) {
+#ifdef DEBUG
+    printf("route_stdio_fd(fdr = %d, fdw = %d)\n", fdr, fdw);
+#endif
+    if (fdr != STDIN_FILENO)
+        if(dup2(fdr, STDIN_FILENO) == -1) 
             die("dup2");
 
-    if (fdo != STDOUT_FILENO)
-        if(dup2(fdo, STDOUT_FILENO) == -1)
+    if (fdw != STDOUT_FILENO)
+        if(dup2(fdw, STDOUT_FILENO) == -1)
             die("dup2");
 }
 
-void close_pipe_fd(int fdi, int fdo) {
-    if (fdi != STDIN_FILENO)
-        if(close(fdi) == -1) 
+void close_pipe_fd(int fdr, int fdw) {
+#ifdef DEBUG
+    printf("close_pipe_fd(fdr = %d, fdw = %d)\n", fdr, fdw);
+#endif
+    if (fdr != STDIN_FILENO)
+        if(close(fdr) == -1) 
             die("close");
 
-    if (fdo != STDOUT_FILENO)
-        if(close(fdo) == -1)
+    if (fdw != STDOUT_FILENO)
+        if(close(fdw) == -1)
             die("close");
 }
 
 // Check for and execute builting commands
 // Return 0 if command is builtin; else -1
-int handle_builtin(const char** argv, int fdi, int fdo) {
+int handle_builtin(const char** argv, int fdr, int fdw) {
 #ifdef DEBUG
     printf("handle_builtin() called\n");
     printf("argv[0]: %s\n", argv[0]);
@@ -155,7 +165,7 @@ int handle_builtin(const char** argv, int fdi, int fdo) {
         if (!dir) 
             die("getcwd");
 
-        write(fdo, dir, sizeof(dir));
+        write(fdw, dir, sizeof(dir));
         free(dir);
 
         bi_flag = 0;
@@ -165,14 +175,12 @@ int handle_builtin(const char** argv, int fdi, int fdo) {
         exit(EXIT_SUCCESS);
     }
 
-    close_pipe_fd(fdi, fdo);
-
     return bi_flag;
 }
 
 
 // Spawn a subprocess for the non-builtin command
-pid_t spawn_proc(struct command *cmd, int fdi, int fdo) {
+pid_t spawn_proc(struct command *cmd, int fdr, int fdw) {
 #ifdef DEBUG
     printf("spawn_proc() called\n");
     for (int i = 0; *(cmd->argv + i) != NULL; i++)
@@ -186,10 +194,12 @@ pid_t spawn_proc(struct command *cmd, int fdi, int fdo) {
 
     if (p == 0) {
         // Redirect stdin and stdout to given pipes respectively
-        open_pipe_fd(fdi, fdo);
+        route_stdio_fd(fdr, fdw);
 
-        if (execvp(cmd->argv[0], (char *const *)cmd->argv) == -1)
-            die("execvp");
+        if (execvp(cmd->argv[0], (char *const *)cmd->argv) == -1) {
+            printf("shell: command not found: %s\n", cmd->argv[0]);
+            exit(EXIT_FAILURE);
+        }
     }
 
     return p;
@@ -197,7 +207,7 @@ pid_t spawn_proc(struct command *cmd, int fdi, int fdo) {
 
 int pipeline(char *input) {
     // I/O file descriptors
-    int fdi = STDIN_FILENO, fdo = STDOUT_FILENO;
+    int fdr = STDIN_FILENO, fdw = STDOUT_FILENO;
     int pfd_next[2];
 
     pid_t p;
@@ -222,20 +232,25 @@ int pipeline(char *input) {
         if (next) {
             if (pipe(pfd_next) == -1)
                 die("pipe");
+#ifdef DEBUG
+            printf("read end :: pfd[0]: %d\n", pfd_next[0]);
+            printf("write end :: pfd[1]: %d\n", pfd_next[1]);
+#endif
 
-            fdo = pfd_next[0];
+            fdw = pfd_next[1];
             parse_command(iter, &cmd);
-            if (handle_builtin(cmd.argv, fdi, fdo) == -1) {
-                p = spawn_proc(&cmd, fdi, fdo);
+            if (handle_builtin(cmd.argv, fdr, fdw) == -1) {
+                p = spawn_proc(&cmd, fdr, fdw);
                 waitpid(p, NULL, WUNTRACED | WCONTINUED);
             }
 
             // Initialize read end for next process
-            fdi = pfd_next[1];
+            close_pipe_fd(fdr, fdw);
+            fdr = pfd_next[0];
         } else {
             parse_command(iter, &cmd);
-            if (handle_builtin(cmd.argv, fdi, fdo) == -1) {
-                p = spawn_proc(&cmd, fdi, fdo);
+            if (handle_builtin(cmd.argv, fdr, STDOUT_FILENO) == -1) {
+                p = spawn_proc(&cmd, fdr, STDOUT_FILENO);
                 waitpid(p, NULL, WUNTRACED | WCONTINUED);
             }
         }
@@ -245,6 +260,9 @@ int pipeline(char *input) {
         iter = next;
         next = strtok(NULL, "|");
     }
+
+    // Close read end of last pipe
+    close_pipe_fd(fdr, STDOUT_FILENO);
     return 0;
 }
 
