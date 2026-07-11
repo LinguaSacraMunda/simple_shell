@@ -12,14 +12,16 @@
 #define MAX_ARGS 64
 #define BUFFER_MAX 1024
 
-
 struct command {
     const char **argv;
 };
 
-void print_directory() {
-    char host[BUFFER_MAX];
-    gethostname(host, BUFFER_MAX);
+char *print_directory() {
+#ifdef DEBUG
+    printf("print_directory() called\n");
+#endif
+    char host[BUFFER_MAX / 2];
+    gethostname(host, BUFFER_MAX / 2);
     char *user = getlogin();
     char *dir = getcwd(NULL, 0);
 
@@ -29,9 +31,18 @@ void print_directory() {
     while (*--cdir != '/');
     cdir++;
 
-    printf("\r{%s@%s %s}$ ", user, host, cdir);
+    //printf("\r{%s@%s %s}$ ", user, host, cdir);
+
+    char *out = malloc((strlen(user) + strlen(host) + strlen(cdir) + 16) * sizeof(char));
+    sprintf(out, "\r{%s@%s %s}$ ", user, host, cdir);
 
     free(dir);
+
+#ifdef DEBUG
+    printf("print_directory() exit\n");
+#endif
+
+    return out;
 }
 
 // Parse a whitespace separated string into a list of arguments
@@ -101,11 +112,14 @@ char *get_dir(const char *path) {
     int len = strlen(path);
     char *buf = malloc(BUFFER_MAX * sizeof(char));
 
+
     if (len == 0 || (len == 1 && *path == '~')){
         sprintf(buf, "%s", home);
     } else if (len > 1 && *path == '~') {
         // Substiture ~ with $HOME
         sprintf(buf, "%s%s", home, path + 1);
+    } else {
+        sprintf(buf, "%s", path);
     }
 
     return buf;
@@ -150,11 +164,14 @@ int handle_builtin(const char** argv, int fdr, int fdw) {
     // Currently supported builtins:
     //  cd, pwd, exit
     if (strcmp(argv[0], "cd") == 0) {
-        char *dir = get_dir(argv[1]);
+        char *dir = (char *)NULL;
+        if (argv[1])
+            dir = get_dir(argv[1]);
+        else
+            dir = get_dir("~");
 
         if (chdir(dir) == -1)
-            die("chdir");
-
+            printf("cd: no such file or directory: %s\n", dir);
         free(dir);
 
         bi_flag = 0;
@@ -268,14 +285,16 @@ int pipeline(char *input) {
 
 int main(void) {
     static char *line = (char *)NULL;
+    char *header = (char *)NULL;
     while (1) {
-        print_directory();
+        header = print_directory();
 
         if (line) {
             free(line);
             line = (char *)NULL;
         }
-        line = readline("");
+        line = readline(header);
+        free(header);
 
         // Ignore empty input
         if (!(line && *line))
