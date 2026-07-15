@@ -62,7 +62,7 @@ int parse_command(char *str, struct command *cmd) {
     cmd->argv[argc++] = iter++;
 
     while (*iter != '\0') {
-        if (*iter == '\"')
+        if (*iter == '\"' || *iter == '\'')
             flag = ~flag;
 
         if (*iter != ' ') {
@@ -89,7 +89,7 @@ int parse_command(char *str, struct command *cmd) {
         }
     }
 
-    if (argc >= MAX_ARGS)
+    if (argc > MAX_ARGS)
         die("Maximum argument number surpassed");
 
     cmd->argv[argc] = NULL;
