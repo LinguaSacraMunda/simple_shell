@@ -12,14 +12,14 @@
 #define MAX_ARGS 64
 #define BUFFER_MAX 1024
 
+#define MASK_AP 0x1<<0
+#define MASK_QT 0x1<<1
+
 struct command {
     const char **argv;
 };
 
 char *print_directory() {
-#ifdef DEBUG
-    printf("print_directory() called\n");
-#endif
     char host[BUFFER_MAX / 2];
     gethostname(host, BUFFER_MAX / 2);
     char *user = getlogin();
@@ -31,16 +31,11 @@ char *print_directory() {
     while (*--cdir != '/');
     cdir++;
 
-    //printf("\r{%s@%s %s}$ ", user, host, cdir);
 
     char *out = malloc((strlen(user) + strlen(host) + strlen(cdir) + 16) * sizeof(char));
     sprintf(out, "\r{%s@%s %s}$ ", user, host, cdir);
 
     free(dir);
-
-#ifdef DEBUG
-    printf("print_directory() exit\n");
-#endif
 
     return out;
 }
@@ -51,19 +46,33 @@ char *print_directory() {
 // We avoid the use of strtok so as to not override its static buffer
 int parse_command(char *str, struct command *cmd) {
     int argc = 0;
+    // Extra pointer for NULL termination
     cmd->argv = malloc((MAX_ARGS + 1)* sizeof(char *));
 
-    // Flag for " character
-    int flag = 0;
+    // Flag for: ", '
+    char flag = 0;
 
-    char *iter = str;
+    char *iter = str, *hlpr = str;
     // Clear leading whitespaces
     while (*iter != '\0' && *iter == ' ') iter++;
+
+    // Initialize flag and first token
+    if (*iter == '\"')
+        flag ^= MASK_QT;
+
+    if (*iter == '\'')
+        flag ^= MASK_AP;
+
     cmd->argv[argc++] = iter++;
 
     while (*iter != '\0') {
-        if (*iter == '\"' || *iter == '\'')
-            flag = ~flag;
+        // Update flag for unescaped quotation marks, outside of apostrophes
+        if (*iter == '\"' && !(flag & MASK_AP) && !(iter > str && *(iter - 1) == '\\'))
+            flag ^= MASK_QT;
+
+        // Update flag for unescaped apostrophes, outside of quotation marks
+        if (*iter == '\'' && !(flag & MASK_QT) && !(iter > str && *(iter - 1) == '\\'))
+            flag ^= MASK_AP;
 
         if (*iter != ' ') {
             iter++;
@@ -75,8 +84,16 @@ int parse_command(char *str, struct command *cmd) {
             iter++; 
             continue;
         } else { 
-            // Token found; end string and clear all 
+            // Token found; end string, remove enclosing 
+            // quotation marks or apostrophes, and clear all 
             // whitespaces till next token
+            if ((*hlpr == '\"' && *(iter - 1) == '\"')
+                ||(*hlpr == '\'' && *(iter - 1) == '\'')) {
+                *hlpr = '\0';
+                *(iter - 1) = '\0';
+                cmd->argv[argc - 1]++;
+            }
+
             *iter++ = '\0';
             while (*iter != '\0' && *iter == ' ') iter++;
 
@@ -84,9 +101,17 @@ int parse_command(char *str, struct command *cmd) {
                 if (argc >= MAX_ARGS)
                     die("Maximum argument number surpassed");
 
+                hlpr = iter;
                 cmd->argv[argc++] = iter;
             }
         }
+    }
+
+    if ((*hlpr == '\"' && *(iter - 1) == '\"')
+        ||(*hlpr == '\'' && *(iter - 1) == '\'')) {
+        *hlpr = '\0';
+        *(iter - 1) = '\0';
+        cmd->argv[argc - 1]++;
     }
 
     if (argc > MAX_ARGS)
@@ -153,16 +178,12 @@ void close_pipe_fd(int fdr, int fdw) {
 
 // Check for and execute builting commands
 // Return 0 if command is builtin; else -1
+//
+// Currently supported builtins:
+//  cd, pwd, exit
 int handle_builtin(const char** argv, int fdr, int fdw) {
-#ifdef DEBUG
-    printf("handle_builtin() called\n");
-    printf("argv[0]: %s\n", argv[0]);
-#endif
-
     int bi_flag = -1;
 
-    // Currently supported builtins:
-    //  cd, pwd, exit
     if (strcmp(argv[0], "cd") == 0) {
         char *dir = (char *)NULL;
         if (argv[1])
@@ -230,23 +251,44 @@ int pipeline(char *input) {
     pid_t p;
     struct command cmd;
 
+
+    // Flag for: \" and \'
+    char flag = 0;
+
     // Divide the input into segments separated by |
-    char *iter = strtok(input, "|");
-    char *next = strtok(NULL, "|");
+    //char *iter = strtok(input, "|");
+    //char *next = strtok(NULL, "|");
 
-#ifdef DEBUG
-    printf("pipeline()\n");
-    printf("iter: %s\n", iter);
-    printf("next: %s\n", next);
-#endif
+    char *iter = input, *next = input;
 
-    while (iter) {
-#ifdef DEBUG
-        printf("entered while(iter) loop with iter = %p\n", iter);
-#endif
+
+    while (*iter != '\0') {
+        while (*next != '\0') {
+            // Update flag for unescaped quotation marks, outside of apostrophes
+            if (*next == '\"' && !(flag & MASK_AP) && !(next > input && *(next - 1) == '\\'))
+                flag ^= MASK_QT;
+
+            // Update flag for unescaped apostrophes, outside of quotation marks
+            if (*next == '\'' && !(flag & MASK_QT) && !(next > input && *(next - 1) == '\\'))
+                flag ^= MASK_AP;
+
+            if (*next != '|') {
+                next++;
+                continue;
+            }
+
+            // Pipe symbol withing quotes or escaped
+            if (*next == '|' && (flag || (next > input && *(next - 1) == '\\'))) {
+                next++;
+                continue;
+            } else {
+                *next++ = '\0';
+                break;
+            }
+        }
 
         // If there exists a next pipeline stage, make a new pipe
-        if (next) {
+        if (*next != '\0') {
             if (pipe(pfd_next) == -1)
                 die("pipe");
 #ifdef DEBUG
@@ -275,7 +317,7 @@ int pipeline(char *input) {
         free(cmd.argv);
 
         iter = next;
-        next = strtok(NULL, "|");
+        //next = strtok(NULL, "|");
     }
 
     // Close read end of last pipe
